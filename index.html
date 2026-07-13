@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fuzzy Logic Satisfaction Analyzer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="page">
+
+  <header class="masthead">
+    <p class="kicker">Portfolio Project &middot; Fuzzy Inference</p>
+    <h1>Fuzzy Logic Satisfaction Analyzer</h1>
+    <p class="dek">Upload a product review dataset and let a Mamdani-style fuzzy inference engine translate star ratings and sentiment into interpretable satisfaction scores &mdash; no hard thresholds, just graded reasoning.</p>
+  </header>
+
+  <section class="card upload-card" id="uploadCard">
+    <div class="dropzone" id="dropzone">
+      <input type="file" id="fileInput" accept=".csv" hidden>
+      <p class="drop-label">Drag &amp; drop a CSV file here</p>
+      <p class="drop-sub">or</p>
+      <button class="btn-primary" id="browseBtn">Browse files</button>
+      <p class="drop-hint">Expects columns: <code>rating</code> (1&ndash;5) and <code>sentiment</code> (Positive / Neutral / Negative)</p>
+    </div>
+    <p class="error-msg" id="errorMsg" hidden></p>
+  </section>
+
+  <section class="card" id="loadingCard" hidden>
+    <div class="loading">
+      <div class="spinner"></div>
+      <p>Running fuzzy inference over your dataset&hellip;</p>
+    </div>
+  </section>
+
+  <section id="results" hidden>
+
+    <section class="card">
+      <h2>Dataset Preview</h2>
+      <div class="stat-grid" id="datasetStats"></div>
+      <div class="table-wrap">
+        <table id="previewTable"></table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Results Dashboard</h2>
+      <div class="stat-grid" id="resultStats"></div>
+
+      <div class="dist-wrap">
+        <h3>Satisfaction Distribution</h3>
+        <div class="dist-bars" id="distBars"></div>
+      </div>
+
+      <div class="insights-wrap">
+        <h3>Key Insights</h3>
+        <ul id="insightsList"></ul>
+      </div>
+
+      <div class="rules-wrap">
+        <h3>Most Frequently Activated Fuzzy Rules</h3>
+        <ol id="rulesList"></ol>
+      </div>
+    </section>
+
+    <section class="card export-card">
+      <h2>Export</h2>
+      <p>Download the original dataset enriched with <code>satisfaction_score</code> and <code>satisfaction_category</code> columns.</p>
+      <button class="btn-primary" id="downloadBtn">Download enriched CSV</button>
+      <button class="btn-secondary" id="resetBtn">Analyze another file</button>
+    </section>
+
+  </section>
+
+  <footer class="site-footer">
+    <p>Fuzzy Logic Satisfaction Analyzer &mdash; built with FastAPI, pandas, and a hand-rolled Mamdani inference engine.</p>
+  </footer>
+
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
