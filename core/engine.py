@@ -78,6 +78,90 @@ def categorize(score):
         return "High"
 
 
+import numpy as np
+
+
+def _tri(x, a, b, c):
+    x = np.asarray(x, dtype=float)
+    y = np.zeros_like(x)
+    left = (x > a) & (x <= b) & (b > a)
+    y[left] = (x[left] - a) / (b - a)
+    right = (x > b) & (x < c) & (c > b)
+    y[right] = (c - x[right]) / (c - b)
+    y[x == b] = 1.0
+    return y
+
+
+def _trap(x, a, b, c, d):
+    x = np.asarray(x, dtype=float)
+    y = np.zeros_like(x)
+    left = (x > a) & (x < b) & (b > a)
+    y[left] = (x[left] - a) / (b - a)
+    flat = (x >= b) & (x <= c)
+    y[flat] = 1.0
+    right = (x > c) & (x < d) & (d > c)
+    y[right] = (d - x[right]) / (d - c)
+    return y
+
+
+_OUT_DOMAIN = np.arange(0, 101, 1.0)
+_OUT_SETS = {
+    "low": _trap(_OUT_DOMAIN, 0, 0, 25, 45),
+    "medium": _tri(_OUT_DOMAIN, 30, 50, 70),
+    "high": _trap(_OUT_DOMAIN, 55, 75, 100, 100),
+}
+
+
+def analyze_batch(ratings, sentiment_labels):
+    """Vectorized fuzzy inference for large datasets (numpy-based).
+
+    ratings: array-like of numeric ratings (1-5)
+    sentiment_labels: array-like of 'Positive'/'Neutral'/'Negative' strings
+    Returns: (scores: np.ndarray, categories: np.ndarray[str], rule_hits: dict[str,int])
+    """
+    r = np.clip(np.asarray(ratings, dtype=float), 1.0, 5.0)
+    labels = np.array([str(s).strip().lower() if s == s else "neutral" for s in sentiment_labels])
+    s = np.vectorize(lambda k: SENTIMENT_MAP.get(k, 0.5))(labels)
+
+    r_deg = {
+        "low": _trap(r, 0, 1, 1.5, 2.5),
+        "medium": _tri(r, 2, 3, 4),
+        "high": _trap(r, 3.5, 4.5, 5, 6),
+    }
+    s_deg = {
+        "negative": _trap(s, -0.1, 0, 0, 0.35),
+        "neutral": _tri(s, 0.15, 0.5, 0.85),
+        "positive": _trap(s, 0.65, 1, 1, 1.1),
+    }
+
+    n = len(r)
+    agg = {"low": np.zeros(n), "medium": np.zeros(n), "high": np.zeros(n)}
+    rule_hits = {}
+
+    for (r_term, s_term), out_term in RULES:
+        strength = np.minimum(r_deg[r_term], s_deg[s_term])
+        agg[out_term] = np.maximum(agg[out_term], strength)
+        count = int((strength > 0).sum())
+        if count:
+            rule_hits[RULE_LABELS[(r_term, s_term)]] = count
+
+    # Centroid defuzzification, vectorized across all rows at once.
+    # For each output point x, aggregated membership = max over terms of min(strength, set(x))
+    numer = np.zeros(n)
+    denom = np.zeros(n)
+    for term in OUTPUT_TERMS:
+        clipped = np.minimum(agg[term][:, None], _OUT_SETS[term][None, :])  # (n, 101)
+        numer += (clipped * _OUT_DOMAIN[None, :]).sum(axis=1)
+        denom += clipped.sum(axis=1)
+
+    scores = np.where(denom > 0, numer / denom, 50.0)
+    scores = np.round(scores, 2)
+
+    categories = np.where(scores < 40, "Low", np.where(scores < 65, "Medium", "High"))
+
+    return scores, categories, rule_hits
+
+
 def analyze_record(rating, sentiment_label):
     """Run full fuzzy inference for a single record.
 
