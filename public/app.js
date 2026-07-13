@@ -12,7 +12,7 @@ const resetBtn = document.getElementById('resetBtn');
 const CHUNK_ROWS = 20000; // rows per request, keeps payload well under 4.5MB
 const CATEGORY_COLORS = { Low: 'var(--low)', Medium: 'var(--medium)', High: 'var(--high)' };
 
-let lastCsvBase64 = null;
+let lastRows = null;
 let lastFilename = 'analyzed.csv';
 
 browseBtn.addEventListener('click', () => fileInput.click());
@@ -48,12 +48,13 @@ resetBtn.addEventListener('click', () => {
 });
 
 downloadBtn.addEventListener('click', () => {
-  if (!lastCsvBase64) return;
-  const byteChars = atob(lastCsvBase64);
-  const byteNumbers = new Array(byteChars.length);
-  for (let i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
-  const byteArray = new Uint8Array(byteNumbers);
-  const blob = new Blob([byteArray], { type: 'text/csv' });
+  if (!lastRows || !lastRows.length) return;
+  const cols = Object.keys(lastRows[0]);
+  const csvLines = [cols.join(',')];
+  for (const row of lastRows) {
+    csvLines.push(cols.map(c => csvEscape(row[c])).join(','));
+  }
+  const blob = new Blob([csvLines.join('\n')], { type: 'text/csv' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -63,6 +64,14 @@ downloadBtn.addEventListener('click', () => {
   a.remove();
   URL.revokeObjectURL(url);
 });
+
+function csvEscape(val) {
+  const s = val === null || val === undefined ? '' : String(val);
+  if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
 
 function showError(msg) {
   errorMsg.textContent = msg;
@@ -121,8 +130,10 @@ async function processInChunks(header, rows, filename) {
   const total = rows.length;
   const chunkCount = Math.ceil(total / CHUNK_ROWS);
 
-  let sessionId = null;
-  let aggregatedSummary = null;
+  let allResultRows = [];
+  let totalMissingValues = 0;
+  let columnCount = header.length;
+  const ruleHitTotals = {};
 
   for (let i = 0; i < chunkCount; i++) {
     const start = i * CHUNK_ROWS;
@@ -131,13 +142,7 @@ async function processInChunks(header, rows, filename) {
 
     setLoadingText(`Analyzing rows ${start + 1}-${end} of ${total}…`);
 
-    const payload = {
-      session_id: sessionId,
-      chunk_index: i,
-      chunk_count: chunkCount,
-      header: header,
-      rows: chunkRows,
-    };
+    const payload = { header, rows: chunkRows };
 
     const res = await fetch('/api/analyze', {
       method: 'POST',
@@ -150,22 +155,86 @@ async function processInChunks(header, rows, filename) {
       throw new Error(data.detail || `Failed processing chunk ${i + 1}/${chunkCount}`);
     }
 
-    sessionId = data.session_id;
+    allResultRows = allResultRows.concat(data.rows);
+    totalMissingValues += data.missing_values || 0;
+    columnCount = data.column_count || columnCount;
 
-    if (data.final) {
-      aggregatedSummary = data.summary;
-      lastCsvBase64 = data.processed_csv_base64;
-      lastFilename = data.processed_filename || `analyzed_${filename}`;
+    for (const [rule, count] of Object.entries(data.rule_hits || {})) {
+      ruleHitTotals[rule] = (ruleHitTotals[rule] || 0) + count;
     }
   }
 
-  if (!aggregatedSummary) {
-    throw new Error('Did not receive a final summary from the server.');
-  }
+  const summary = buildSummary(allResultRows, totalMissingValues, columnCount, ruleHitTotals);
 
-  renderResults(aggregatedSummary);
+  lastRows = allResultRows;
+  lastFilename = `analyzed_${filename}`;
+
+  renderResults(summary);
   loadingCard.hidden = true;
   resultsSection.hidden = false;
+}
+
+function buildSummary(rows, missingValues, columnCount, ruleHitTotals) {
+  const total = rows.length || 1;
+  const distribution = { Low: 0, Medium: 0, High: 0 };
+  let scoreSum = 0;
+
+  for (const row of rows) {
+    distribution[row.satisfaction_category] = (distribution[row.satisfaction_category] || 0) + 1;
+    scoreSum += Number(row.satisfaction_score) || 0;
+  }
+
+  const avg = scoreSum / total;
+
+  const pct = {};
+  for (const cat of ['Low', 'Medium', 'High']) {
+    pct[cat] = Math.round((distribution[cat] / total) * 1000) / 10;
+  }
+
+  const topRules = Object.entries(ruleHitTotals)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([rule, count]) => ({ rule, count }));
+
+  const insights = generateInsights(distribution, total, avg);
+
+  return {
+    record_count: rows.length,
+    column_count: columnCount,
+    missing_values: missingValues,
+    average_satisfaction_score: Math.round(avg * 100) / 100,
+    satisfaction_distribution: distribution,
+    satisfaction_distribution_pct: pct,
+    top_fired_rules: topRules,
+    preview_rows: rows.slice(0, 5),
+    insights,
+  };
+}
+
+function generateInsights(distribution, total, avg) {
+  const insights = [];
+  const lowPct = (distribution.Low / total) * 100;
+  const highPct = (distribution.High / total) * 100;
+
+  if (highPct >= 60) {
+    insights.push(`The majority of reviews (${highPct.toFixed(1)}%) reflect high satisfaction, suggesting strong overall product perception.`);
+  }
+  if (lowPct >= 30) {
+    insights.push(`A notable share of reviews (${lowPct.toFixed(1)}%) fall into the low satisfaction band, worth investigating for recurring complaints.`);
+  }
+  if (avg >= 70) {
+    insights.push(`Average satisfaction score is ${avg.toFixed(1)}/100, indicating generally positive reception.`);
+  } else if (avg <= 40) {
+    insights.push(`Average satisfaction score is ${avg.toFixed(1)}/100, indicating widespread dissatisfaction.`);
+  } else {
+    insights.push(`Average satisfaction score is ${avg.toFixed(1)}/100, indicating mixed sentiment overall.`);
+  }
+
+  if (!insights.length) {
+    insights.push('Satisfaction scores are broadly distributed across categories with no dominant trend.');
+  }
+
+  return insights;
 }
 
 function renderResults(summary) {
