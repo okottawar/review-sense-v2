@@ -4,14 +4,16 @@ const browseBtn = document.getElementById('browseBtn');
 const errorMsg = document.getElementById('errorMsg');
 const uploadCard = document.getElementById('uploadCard');
 const loadingCard = document.getElementById('loadingCard');
+const loadingText = document.querySelector('#loadingCard p');
 const resultsSection = document.getElementById('results');
 const downloadBtn = document.getElementById('downloadBtn');
 const resetBtn = document.getElementById('resetBtn');
 
+const CHUNK_ROWS = 20000; // rows per request, keeps payload well under 4.5MB
+const CATEGORY_COLORS = { Low: 'var(--low)', Medium: 'var(--medium)', High: 'var(--high)' };
+
 let lastCsvBase64 = null;
 let lastFilename = 'analyzed.csv';
-
-const CATEGORY_COLORS = { Low: 'var(--low)', Medium: 'var(--medium)', High: 'var(--high)' };
 
 browseBtn.addEventListener('click', () => fileInput.click());
 
@@ -71,6 +73,10 @@ function hideError() {
   errorMsg.hidden = true;
 }
 
+function setLoadingText(msg) {
+  if (loadingText) loadingText.textContent = msg;
+}
+
 async function handleFile(file) {
   hideError();
 
@@ -82,25 +88,11 @@ async function handleFile(file) {
   uploadCard.hidden = true;
   loadingCard.hidden = false;
   resultsSection.hidden = true;
-
-  const formData = new FormData();
-  formData.append('file', file);
+  setLoadingText('Parsing CSV in your browser…');
 
   try {
-    const res = await fetch('/api/analyze', { method: 'POST', body: formData });
-    const data = await res.json();
-
-    if (!res.ok) {
-      throw new Error(data.detail || 'Something went wrong while analyzing the file.');
-    }
-
-    lastCsvBase64 = data.processed_csv_base64;
-    lastFilename = data.processed_filename || 'analyzed.csv';
-
-    renderResults(data.summary);
-
-    loadingCard.hidden = true;
-    resultsSection.hidden = false;
+    const { header, rows } = await parseCsvFile(file);
+    await processInChunks(header, rows, file.name);
   } catch (err) {
     loadingCard.hidden = true;
     uploadCard.hidden = false;
@@ -108,8 +100,75 @@ async function handleFile(file) {
   }
 }
 
+function parseCsvFile(file) {
+  return new Promise((resolve, reject) => {
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (results) => {
+        if (!results.data.length) {
+          reject(new Error('CSV file contains no data rows.'));
+          return;
+        }
+        resolve({ header: results.meta.fields, rows: results.data });
+      },
+      error: (err) => reject(new Error('Could not parse CSV: ' + err.message)),
+    });
+  });
+}
+
+async function processInChunks(header, rows, filename) {
+  const total = rows.length;
+  const chunkCount = Math.ceil(total / CHUNK_ROWS);
+
+  let sessionId = null;
+  let aggregatedSummary = null;
+
+  for (let i = 0; i < chunkCount; i++) {
+    const start = i * CHUNK_ROWS;
+    const end = Math.min(start + CHUNK_ROWS, total);
+    const chunkRows = rows.slice(start, end);
+
+    setLoadingText(`Analyzing rows ${start + 1}-${end} of ${total}…`);
+
+    const payload = {
+      session_id: sessionId,
+      chunk_index: i,
+      chunk_count: chunkCount,
+      header: header,
+      rows: chunkRows,
+    };
+
+    const res = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.detail || `Failed processing chunk ${i + 1}/${chunkCount}`);
+    }
+
+    sessionId = data.session_id;
+
+    if (data.final) {
+      aggregatedSummary = data.summary;
+      lastCsvBase64 = data.processed_csv_base64;
+      lastFilename = data.processed_filename || `analyzed_${filename}`;
+    }
+  }
+
+  if (!aggregatedSummary) {
+    throw new Error('Did not receive a final summary from the server.');
+  }
+
+  renderResults(aggregatedSummary);
+  loadingCard.hidden = true;
+  resultsSection.hidden = false;
+}
+
 function renderResults(summary) {
-  // Dataset preview stats
   const datasetStats = document.getElementById('datasetStats');
   datasetStats.innerHTML = `
     ${stat(summary.record_count, 'Records')}
@@ -117,7 +176,6 @@ function renderResults(summary) {
     ${stat(summary.missing_values, 'Missing values')}
   `;
 
-  // Preview table
   const table = document.getElementById('previewTable');
   const rows = summary.preview_rows || [];
   if (rows.length) {
@@ -129,7 +187,6 @@ function renderResults(summary) {
     table.innerHTML = html;
   }
 
-  // Result stats
   const resultStats = document.getElementById('resultStats');
   resultStats.innerHTML = `
     ${stat(summary.average_satisfaction_score, 'Avg. satisfaction score')}
@@ -137,7 +194,6 @@ function renderResults(summary) {
     ${stat(summary.satisfaction_distribution.Low, 'Low satisfaction')}
   `;
 
-  // Distribution bars
   const distBars = document.getElementById('distBars');
   const pct = summary.satisfaction_distribution_pct;
   distBars.innerHTML = ['Low', 'Medium', 'High'].map(cat => `
@@ -150,11 +206,9 @@ function renderResults(summary) {
     </div>
   `).join('');
 
-  // Insights
   const insightsList = document.getElementById('insightsList');
   insightsList.innerHTML = (summary.insights || []).map(i => `<li>${escapeHtml(i)}</li>`).join('');
 
-  // Rules
   const rulesList = document.getElementById('rulesList');
   rulesList.innerHTML = (summary.top_fired_rules || []).map(r =>
     `<li>${escapeHtml(r.rule)} <strong>(${r.count}&times;)</strong></li>`
