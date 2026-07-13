@@ -3,10 +3,11 @@
 from collections import Counter
 import pandas as pd
 
-from core.engine import analyze_record
+from core.engine import analyze_batch
 
 
 REQUIRED_COLUMNS = ["rating", "sentiment"]
+MAX_ROWS = 200_000  # safety cap so a single serverless invocation doesn't time out
 
 
 def validate_columns(df: pd.DataFrame):
@@ -21,37 +22,32 @@ def validate_columns(df: pd.DataFrame):
 def analyze_dataframe(df: pd.DataFrame):
     validate_columns(df)
 
-    scores = []
-    categories = []
-    rule_counter = Counter()
+    sampled = False
+    original_count = len(df)
+    if len(df) > MAX_ROWS:
+        df = df.sample(n=MAX_ROWS, random_state=42).reset_index(drop=True)
+        sampled = True
 
-    for _, row in df.iterrows():
-        rating = row.get("rating")
-        sentiment = row.get("sentiment")
+    ratings = df["rating"].fillna(3.0).values
+    sentiments = df["sentiment"].fillna("Neutral").values
 
-        if pd.isna(rating):
-            rating = 3.0  # neutral fallback for missing rating
-        if pd.isna(sentiment):
-            sentiment = "Neutral"
-
-        result = analyze_record(rating, sentiment)
-        scores.append(result["satisfaction_score"])
-        categories.append(result["satisfaction_category"])
-        for rule in result["fired_rules"]:
-            rule_counter[rule] += 1
+    scores, categories, rule_hits = analyze_batch(ratings, sentiments)
 
     df_out = df.copy()
     df_out["satisfaction_score"] = scores
     df_out["satisfaction_category"] = categories
 
-    distribution = Counter(categories)
+    distribution = Counter(categories.tolist())
     total = len(categories) or 1
+    rule_counter = Counter(rule_hits)
 
     summary = {
-        "record_count": len(df),
+        "record_count": original_count,
+        "analyzed_count": len(df),
+        "sampled": sampled,
         "column_count": len(df.columns),
         "missing_values": int(df.isna().sum().sum()),
-        "average_satisfaction_score": round(sum(scores) / total, 2) if scores else 0,
+        "average_satisfaction_score": round(float(scores.mean()), 2) if len(scores) else 0,
         "satisfaction_distribution": {
             "Low": distribution.get("Low", 0),
             "Medium": distribution.get("Medium", 0),
@@ -80,7 +76,7 @@ def generate_insights(distribution, total, scores):
     insights = []
     low_pct = distribution.get("Low", 0) / total * 100
     high_pct = distribution.get("High", 0) / total * 100
-    avg = sum(scores) / total if scores else 0
+    avg = float(scores.mean()) if len(scores) else 0
 
     if high_pct >= 60:
         insights.append(
